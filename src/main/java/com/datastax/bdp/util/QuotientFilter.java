@@ -368,6 +368,7 @@ public class QuotientFilter implements Iterable<Long> {
     }
 
     private void selfResizeDouble() {
+        System.out.printf("%d resizing from %d to %d, load factor %.2f%n", System.identityHashCode(this), MAX_INSERTIONS, MAX_INSERTIONS * 2, entries / (double)MAX_SIZE);
         QuotientFilter qf = resize(MAX_INSERTIONS * 2);
         QUOTIENT_BITS = qf.QUOTIENT_BITS;
         REMAINDER_BITS = qf.REMAINDER_BITS;
@@ -383,7 +384,7 @@ public class QuotientFilter implements Iterable<Long> {
         }
     }
 
-    public boolean maybeContain(long hash) {
+    public boolean maybeContains(long hash) {
         if (overflowed) {
             //Can't check for existence after overflow occurred
             //and things are missing
@@ -553,9 +554,13 @@ public class QuotientFilter implements Iterable<Long> {
         return merge(ImmutableList.of(this, other));
     }
 
+    public QuotientFilter merge(QuotientFilter... filters) {
+        return merge(Arrays.asList(filters));
+    }
+
     /*
-     * Resizes the filter to return at a filter with the same contents and space for the minimum specified number
-     * of entries
+     * Resizes the filter return a filter with the same contents and space for the minimum specified number
+     * of entries. This may allocate a new filter or return the existing filter.
      */
     public QuotientFilter resize(long minimumEntries) {
         if (minimumEntries <= MAX_INSERTIONS) {
@@ -587,7 +592,7 @@ public class QuotientFilter implements Iterable<Long> {
         return new QFIterator();
     }
 
-    class QFIterator implements Iterator<Long> {
+    class QFIterator implements LongIterator {
         long index;
         long quotient;
         long visited;
@@ -615,11 +620,6 @@ public class QuotientFilter implements Iterable<Long> {
         @Override
         public boolean hasNext() {
             return entries != visited;
-        }
-
-        @Override
-        public Long next() {
-            return nextPrimitive();
         }
 
         public long nextPrimitive() {

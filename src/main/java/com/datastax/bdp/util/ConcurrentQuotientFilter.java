@@ -17,13 +17,15 @@ package com.datastax.bdp.util;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
+import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Ordering;
 import com.google.common.collect.UnmodifiableIterator;
+import com.google.common.math.LongMath;
+import com.google.common.primitives.Ints;
 import net.jpountz.xxhash.XXHashFactory;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -38,7 +40,7 @@ public class ConcurrentQuotientFilter
     static final XXHashFactory hashFactory = XXHashFactory.fastestInstance();
     private final List<Stripe> stripes;
 
-    public ConcurrentQuotientFilter(long largestNumberOfElements, int startingElements, int numStripes)
+    public ConcurrentQuotientFilter(long largestNumberOfElements, long startingElements, int numStripes)
     {
         Preconditions.checkArgument(startingElements > 0);
         Preconditions.checkArgument(largestNumberOfElements > startingElements);
@@ -46,10 +48,13 @@ public class ConcurrentQuotientFilter
         Preconditions.checkArgument(largestNumberOfElements / numStripes > 0);
         Preconditions.checkArgument(startingElements / numStripes > 0);
         Preconditions.checkArgument(numStripes <= 1024);
-        //Life is just easier if these are powers of 2, so enforce it. They will be rounded to them anyways.
-        Preconditions.checkArgument(Integer.bitCount(numStripes) == 1);
-        Preconditions.checkArgument(Long.bitCount(largestNumberOfElements) == 1);
-        Preconditions.checkArgument(Long.bitCount(startingElements) == 1);
+
+        //Make them all powers of two, the rounding will happen in quotient filter anyways.
+        largestNumberOfElements = roundUpPowerOf2(largestNumberOfElements);
+        startingElements = roundUpPowerOf2(startingElements);
+        numStripes = Ints.checkedCast(roundUpPowerOf2(startingElements));
+        System.out.printf("Largest elements %d, starting elements %d, numStripes %d%n", largestNumberOfElements, startingElements, numStripes);
+
 
         QuotientFilter qf = QuotientFilter.create(largestNumberOfElements, 1);
         if ((64 - (qf.REMAINDER_BITS + qf.QUOTIENT_BITS)) < 10)
@@ -62,18 +67,26 @@ public class ConcurrentQuotientFilter
         {
             //All stripes must have the same largest number of elements in order to end up with the same
             //size fingerprint.
-            stripes.add(new Stripe(largestNumberOfElements, Math.max(1, startingElements / numStripes)));
+            stripes.add(new Stripe(largestNumberOfElements, Math.max(1, startingElements / numStripes), ii));
         }
     }
 
-    public void insert(byte[] data)
-    {
-        insert(data);
+    static long roundUpPowerOf2(long value) {
+        return Long.bitCount(value) == 1 ?
+                value :
+                Long.highestOneBit(value) << 1L;
     }
 
-    public void insert(byte[] data, int offset, int length)
+    public long insert(byte[] data)
     {
-        insert(hashFactory.hash64().hash(data, offset, length, 0));
+        return insert(data, 0, data.length);
+    }
+
+    public long insert(byte[] data, int offset, int length)
+    {
+        long hash = hashFactory.hash64().hash(data, offset, length, 0);
+        insert(hash);
+        return hash;
     }
 
     public void insert(long hash)
@@ -104,18 +117,31 @@ public class ConcurrentQuotientFilter
         }
     }
 
-    public boolean maybeContain(long hash)
+    public boolean maybeContains(long hash)
     {
         Stripe stripe = stripe(hash);
         stripe.lock.readLock().lock();
         try
         {
-            return stripe.qf.maybeContain(hash);
+            return stripe.qf.maybeContains(hash);
         }
         finally
         {
             stripe.lock.readLock().unlock();
         }
+    }
+
+    public long allocatedSize() {
+        long sum = 0;
+        for (Stripe s : stripes) {
+            s.lock.readLock().lock();
+            try {
+                sum += s.qf.MAX_SIZE;
+            } finally {
+                s.lock.readLock().unlock();
+            }
+        }
+        return sum;
     }
 
     private Stripe stripe(long hash)
@@ -124,34 +150,14 @@ public class ConcurrentQuotientFilter
         return stripes.get((((int)hash >>> (64 - 10)) % stripes.size()));
     }
 
-    public void insertAll(Collection<QuotientFilter> filtersToAdd)
+    public void insertAll(Iterator<Long> hashes)
     {
-        if (filtersToAdd.stream().map(filter -> filter.REMAINDER_BITS + filter.QUOTIENT_BITS).distinct().count() != 1)
-        {
-            throw new IllegalArgumentException("All filters must have the same size fingerprint");
-        }
-
-        int remainderBits = filtersToAdd.iterator().next().REMAINDER_BITS;
-        int quotientBits = filtersToAdd.iterator().next().QUOTIENT_BITS;
-        int fingerprintBits = remainderBits + quotientBits;
-
         try (AutoCloseable lock = lockAll(true))
         {
-            boolean notEmpty = false;
-            for (Stripe s : stripes)
-            {
-                notEmpty |= s.qf.entries > 0;
-            }
-
-            long totalEntries = filtersToAdd.stream().collect(Collectors.summingLong(filter -> filter.entries));
-
-
-            //TODO presize the output tables to reduce resizing
-            Iterable<Iterator<Long>> filterIterators = (Iterable) filtersToAdd.stream().map(stripe -> stripe.iterator()).collect(Collectors.toList());
-            Iterator<Long> hashes = Iterators.mergeSorted(filterIterators, Ordering.natural());
             while (hashes.hasNext())
             {
-                insert(hashes.next());
+                long hash = hashes.next();
+                stripe(hash).qf.insert(hash);
             }
         }
         catch (Exception e)
@@ -200,9 +206,18 @@ public class ConcurrentQuotientFilter
 
         private CQFIterator()
         {
-            Iterable<Iterator<Long>> filters = (Iterable)stripes.stream().map(stripe -> stripe.qf.iterator()).collect(Collectors.toList());
-            delegate = Iterators.mergeSorted(filters, Ordering.natural());
             unlock = lockAll(false);
+            Iterable<Iterator<Long>> filters = (Iterable)stripes.stream().map(stripe -> new AbstractIterator<Long>() {
+                private final Iterator<Long> delegate = stripe.qf.iterator();
+                @Override
+                public Long computeNext() {
+                    if (delegate.hasNext()) {
+                        return delegate.next() | (stripe.index << (64 - 10));
+                    }
+                    endOfData();
+                    return null;
+                }}).collect(Collectors.toList());
+            delegate = Iterators.mergeSorted(filters, Ordering.natural());
         }
 
 
@@ -222,19 +237,21 @@ public class ConcurrentQuotientFilter
         }
     }
 
+    int fingerprintBits() {
+        QuotientFilter qf = stripes.get(0).qf;
+        return qf.QUOTIENT_BITS + qf.REMAINDER_BITS;
+    }
+
     private class Stripe
     {
         final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+        final int index;
         QuotientFilter qf;
 
-        public Stripe(long largestNumberOfElements, int startingElements)
+        public Stripe(long largestNumberOfElements, long startingElements, int index)
         {
             qf = QuotientFilter.create(largestNumberOfElements, startingElements);
-        }
-
-        private void resize(long minimumElements)
-        {
-            qf = qf.resize(minimumElements);
+            this.index = index;
         }
     }
 }

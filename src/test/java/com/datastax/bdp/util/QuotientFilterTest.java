@@ -200,7 +200,7 @@ public class QuotientFilterTest {
             hash = i.next();
         }
         qf.remove(hash);
-        assertTrue(!qf.maybeContain(hash));
+        assertTrue(!qf.maybeContains(hash));
         keys.remove(hash);
     }
 
@@ -211,7 +211,7 @@ public class QuotientFilterTest {
         Iterator<Long> i = keys.iterator();
         while (i.hasNext())
         {
-            assertTrue(qf.maybeContain(i.next()));
+            assertTrue(qf.maybeContains(i.next()));
         }
     }
 
@@ -273,10 +273,10 @@ public class QuotientFilterTest {
             }
             ht_check(qf, keys);
 
-            QuotientFilter.QFIterator QFIterator = qf.new QFIterator();
-            while (QFIterator.hasNext())
+            LongIterator qfIterator = qf.iterator();
+            while (qfIterator.hasNext())
             {
-                long hash = QFIterator.next();
+                long hash = qfIterator.next();
                 assertTrue(keys.contains(hash));
             }
         }
@@ -309,7 +309,7 @@ public class QuotientFilterTest {
 
         for (int i = 0; i < nlookups; ++i)
         {
-            qf.maybeContain(tlr.nextLong());
+            qf.maybeContains(tlr.nextLong());
         }
         long tv2 = System.nanoTime();
         long sec = TimeUnit.NANOSECONDS.toSeconds(tv2 - tv1);
@@ -334,7 +334,7 @@ public class QuotientFilterTest {
         }
         for (int i = 0; i < nlookups; ++i)
         {
-            qf.maybeContain(tlr.nextLong());
+            qf.maybeContains(tlr.nextLong());
             if (i % 50000 == 0) {
                 System.out.print(".");
                 System.out.flush();
@@ -364,7 +364,7 @@ public class QuotientFilterTest {
         QuotientFilter.QFIterator QFIterator = lhs.new QFIterator();
         while (QFIterator.hasNext())
         {
-            assertTrue(rhs.maybeContain(QFIterator.next()));
+            assertTrue(rhs.maybeContains(QFIterator.next()));
         }
     }
 
@@ -376,7 +376,7 @@ public class QuotientFilterTest {
         while (QFIterator.hasNext())
         {
             long hash = QFIterator.next();
-            assertTrue(qf1.maybeContain(hash) | qf2.maybeContain(hash));
+            assertTrue(qf1.maybeContains(hash) | qf2.maybeContains(hash));
         }
     }
 
